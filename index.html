@@ -38,244 +38,349 @@ const PRI = {
   Medium: {bg:"#FAEEDA", text:"#854F0B"},
   Low:    {bg:"#EAF3DE", text:"#3B6D11"},
 };
+const PRIORITY_RULES = {essential:50,work:45,health:40,business:35,family:30,friends:25,grooming:20,pet:15};
 
-function getTomorrow() {
-  const d = new Date(); d.setDate(d.getDate() + 1);
-  return d.toISOString().split("T")[0];
-}
+function getTomorrow() { const d=new Date(); d.setDate(d.getDate()+1); return d.toISOString().split("T")[0]; }
 function getToday() { return new Date().toISOString().split("T")[0]; }
-function fmtDate(d) {
-  if (!d) return "";
-  const p = d.split("-");
-  return p[2] + "/" + p[1] + "/" + p[0];
+function fmtDate(d) { if(!d) return ""; const p=d.split("-"); return p[2]+"/"+p[1]+"/"+p[0]; }
+function calcScore(task) {
+  const catScore = PRIORITY_RULES[task.category]||20;
+  let urgency = 0;
+  if (task.due) {
+    const days = Math.ceil((new Date(task.due)-new Date())/86400000);
+    if(days<0) urgency=50; else if(days===0) urgency=45; else if(days===1) urgency=40;
+    else if(days<=3) urgency=30; else if(days<=7) urgency=20; else if(days<=14) urgency=10;
+  }
+  return Math.min(100, catScore+urgency);
+}
+function getPriority(score) { return score>=70?"High":score>=40?"Medium":"Low"; }
+function load(key, def) { try { return JSON.parse(localStorage.getItem(key)||"null") || def; } catch(e) { return def; } }
+function save(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch(e) {} }
+
+const TAB_STYLE = (active) => ({
+  flex:1, padding:"10px 0", fontSize:13, fontWeight:500, cursor:"pointer", border:"none",
+  background:"transparent", borderBottom: active ? "2px solid #007aff" : "2px solid transparent",
+  color: active ? "#007aff" : "#8e8e93", transition:"all 0.15s"
+});
+
+function StatCard({label, value, sub}) {
+  return (
+    <div style={{background:"#e5e5ea",borderRadius:12,padding:"12px 14px",flex:1}}>
+      <div style={{fontSize:12,color:"#8e8e93",marginBottom:4}}>{label}</div>
+      <div style={{fontSize:22,fontWeight:600,color:"#1c1c1e"}}>{value}</div>
+      {sub && <div style={{fontSize:11,color:"#aeaeb2",marginTop:2}}>{sub}</div>}
+    </div>
+  );
 }
 
 function App() {
-  let saved = {};
-  try { saved = JSON.parse(localStorage.getItem("dtp-v4") || "{}"); } catch(e) {}
-
-  const [tasks, setTasksRaw] = useState(saved.tasks || []);
-  const [analyzed, setAnalyzedRaw] = useState(saved.analyzed || false);
+  const [tab, setTab] = useState("planner");
+  const [tasks, setTasksRaw] = useState(load("dtp-tasks", []));
+  const [history, setHistoryRaw] = useState(load("dtp-history", []));
   const [selCat, setSelCat] = useState("work");
   const [filterCat, setFilterCat] = useState("all");
   const [title, setTitle] = useState("");
   const [due, setDue] = useState(getTomorrow());
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [showSummary, setShowSummary] = useState(false);
 
-  function persist(t, a) {
-    try { localStorage.setItem("dtp-v4", JSON.stringify({tasks: t, analyzed: a})); } catch(e) {}
-  }
-  function setTasks(t, a) {
-    const an = a !== undefined ? a : analyzed;
-    setTasksRaw(t); setAnalyzedRaw(an); persist(t, an);
-  }
+  function setTasks(t) { setTasksRaw(t); save("dtp-tasks", t); }
+  function setHistory(h) { setHistoryRaw(h); save("dtp-history", h); }
 
   function addTask() {
     if (!title.trim()) return;
-    setTasks(tasks.concat([{id: Date.now(), title: title.trim(), due, category: selCat, score: null, priority: null, reason: null, done: false}]), false);
-    setTitle("");
+    const score = calcScore({category:selCat, due});
+    const t = tasks.concat([{id:Date.now(), title:title.trim(), due, category:selCat, score, priority:getPriority(score), done:false}]);
+    t.sort((a,b)=>(b.score||0)-(a.score||0));
+    setTasks(t); setTitle("");
   }
 
   function toggleDone(id) {
-    setTasks(tasks.map(x => x.id === id ? Object.assign({}, x, {done: !x.done}) : x), analyzed);
+    setTasks(tasks.map(x => x.id===id ? Object.assign({},x,{done:!x.done}) : x));
   }
 
-  function deleteTask(id) {
-    setTasks(tasks.filter(x => x.id !== id), false);
+  function deleteTask(id) { setTasks(tasks.filter(x=>x.id!==id)); }
+
+  function endDay() {
+    const doneT = tasks.filter(t=>t.done);
+    const total = tasks.length;
+    if (total===0) return;
+    const entry = {
+      date: getToday(), total, completed: doneT.length,
+      pct: Math.round((doneT.length/total)*100),
+      tasks: tasks.map(t=>({title:t.title, category:t.category, done:t.done}))
+    };
+    const h = [entry].concat(history).slice(0,30);
+    setHistory(h); setTasks([]); setShowSummary(false);
   }
 
-  function clearAll() { setTasksRaw([]); setAnalyzedRaw(false); persist([], false); }
-
-  function analyze() {
-    if (!tasks.length) return;
-    setLoading(true); setError("");
-    const list = tasks.map((t, i) => {
-      const cat = CAT[t.category] ? CAT[t.category].label : t.category;
-      return (i+1) + ". " + t.title + " | Cat: " + cat + " | Due: " + (t.due || "none");
-    }).join("\n");
-    const prompt = "Score each task 0-100 by urgency (today=" + getToday() + ") and category. High=70-100, Medium=40-69, Low=0-39. Max 10 word reason.\nTasks:\n" + list + "\nJSON only: [{\"index\":1,\"score\":80,\"priority\":\"High\",\"reason\":\"short reason\"}]";
-    fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({model:"claude-sonnet-4-20250514", max_tokens:1000, messages:[{role:"user", content:prompt}]})
-    })
-    .then(r => r.json())
-    .then(data => {
-      const raw = (data.content||[]).map(b => b.text||"").join("").replace(/```json|```/g,"").trim();
-      const results = JSON.parse(raw);
-      let updated = tasks.map((t, i) => {
-        let found = null;
-        results.forEach(r => { if (r.index === i+1) found = r; });
-        return found ? Object.assign({}, t, {score: found.score, priority: found.priority, reason: found.reason}) : t;
-      });
-      updated.sort((a, b) => (b.score||0) - (a.score||0));
-      setTasks(updated, true); setLoading(false);
-    })
-    .catch(() => { setError("Analysis failed. Please try again."); setLoading(false); });
-  }
-
-  const done = tasks.filter(t => t.done).length;
+  const done = tasks.filter(t=>t.done).length;
   const total = tasks.length;
   const pct = total ? Math.round((done/total)*100) : 0;
-  const pending = tasks.filter(t => !t.done);
-  const completed = tasks.filter(t => t.done);
-  const visiblePending = filterCat === "all" ? pending : pending.filter(t => t.category === filterCat);
-  const visibleDone = filterCat === "all" ? completed : completed.filter(t => t.category === filterCat);
+  const pending = tasks.filter(t=>!t.done);
+  const completed = tasks.filter(t=>t.done);
+  const visiblePending = filterCat==="all" ? pending : pending.filter(t=>t.category===filterCat);
+  const visibleDone = filterCat==="all" ? completed : completed.filter(t=>t.category===filterCat);
   const usedCats = [];
-  tasks.forEach(t => { if (!usedCats.includes(t.category)) usedCats.push(t.category); });
+  tasks.forEach(t=>{ if(usedCats.indexOf(t.category)===-1) usedCats.push(t.category); });
 
-  function TaskCard({t, idx, showRank}) {
-    const c = CAT[t.category] || {label:t.category, color:"#333", bg:"#eee", border:"#ccc"};
-    const p = PRI[t.priority] || {bg:"#eee", text:"#333"};
-    const sc = t.score || 0;
-    const scColor = sc >= 70 ? "#ff3b30" : sc >= 40 ? "#ff9500" : "#34c759";
+  const totalDays = history.length;
+  const totalCompleted = history.reduce((s,d)=>s+d.completed,0);
+  const totalTasksEver = history.reduce((s,d)=>s+d.total,0);
+  const avgPct = totalDays ? Math.round(history.reduce((s,d)=>s+d.pct,0)/totalDays) : 0;
+  const bestDay = history.reduce((b,d)=>d.completed>b.completed?d:b, {completed:0,date:"",pct:0});
+  const streak = (function() {
+    var s=0; var today=new Date(getToday());
+    for(var i=0;i<history.length;i++){
+      var d=new Date(history[i].date);
+      var diff=Math.round((today-d)/86400000);
+      if(diff===i) s++; else break;
+    }
+    return s;
+  })();
+  const catBreakdown = CATS.map(c=>{
+    var tot = history.reduce((s,d)=>s+d.tasks.filter(t=>t.category===c.id).length,0);
+    var dn = history.reduce((s,d)=>s+d.tasks.filter(t=>t.category===c.id&&t.done).length,0);
+    return Object.assign({},c,{total:tot, done:dn, pct:tot?Math.round((dn/tot)*100):0});
+  }).filter(c=>c.total>0).sort((a,b)=>b.done-a.done);
+
+  function TaskCard(props) {
+    var t = props.t, idx = props.idx, showRank = props.showRank;
+    var c = CAT[t.category]||{label:t.category,color:"#333",bg:"#eee",border:"#ccc"};
+    var p = PRI[t.priority]||{bg:"#eee",text:"#333"};
+    var scColor = t.score>=70?"#ff3b30":t.score>=40?"#ff9500":"#34c759";
     return (
-      <div style={{background:"#fff", borderRadius:16, padding:"14px 16px", boxShadow:"0 1px 3px rgba(0,0,0,0.07)", borderLeft:"4px solid "+c.border, opacity:t.done?0.55:1}}>
-        <div style={{display:"flex", alignItems:"flex-start", gap:10}}>
-          <div onClick={() => toggleDone(t.id)} style={{width:24, height:24, borderRadius:"50%", flexShrink:0, marginTop:1, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", background:t.done?"#34c759":"transparent", border:t.done?"2px solid #34c759":"2px solid #c7c7cc"}}>
-            {t.done && <span style={{color:"#fff", fontSize:13, fontWeight:700}}>✓</span>}
+      <div style={{background:"#fff",borderRadius:16,padding:"14px 16px",border:"0.5px solid #e0e0e0",borderLeft:"4px solid "+c.border,opacity:t.done?0.55:1}}>
+        <div style={{display:"flex",alignItems:"flex-start",gap:10}}>
+          <div onClick={function(){toggleDone(t.id);}} style={{width:24,height:24,borderRadius:"50%",flexShrink:0,marginTop:1,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",background:t.done?"#34c759":"transparent",border:t.done?"2px solid #34c759":"2px solid #c7c7cc"}}>
+            {t.done && <span style={{color:"#fff",fontSize:13,fontWeight:700}}>✓</span>}
           </div>
-          <div style={{flex:1, minWidth:0}}>
-            <div style={{display:"flex", alignItems:"center", gap:6}}>
-              {showRank && <span style={{fontSize:12, fontWeight:600, color:"#c7c7cc"}}>#{idx+1}</span>}
-              <span style={{fontSize:15, fontWeight:500, color:"#1c1c1e", textDecoration:t.done?"line-through":"none"}}>{t.title}</span>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{display:"flex",alignItems:"center",gap:6}}>
+              {showRank && <span style={{fontSize:12,fontWeight:600,color:"#c7c7cc"}}>#{idx+1}</span>}
+              <span style={{fontSize:15,fontWeight:500,color:"#1c1c1e",textDecoration:t.done?"line-through":"none"}}>{t.title}</span>
             </div>
-            <div style={{display:"flex", gap:6, flexWrap:"wrap", alignItems:"center", marginTop:6}}>
-              <span style={{fontSize:11, fontWeight:600, padding:"3px 9px", borderRadius:20, background:c.bg, color:c.color}}>{c.label}</span>
-              {t.priority && <span style={{fontSize:11, fontWeight:600, padding:"3px 9px", borderRadius:20, background:p.bg, color:p.text}}>{t.priority}</span>}
-              {t.due && <span style={{fontSize:12, color:"#8e8e93"}}>Due {fmtDate(t.due)}</span>}
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",marginTop:6}}>
+              <span style={{fontSize:11,fontWeight:600,padding:"3px 9px",borderRadius:20,background:c.bg,color:c.color}}>{c.label}</span>
+              {t.priority && <span style={{fontSize:11,fontWeight:600,padding:"3px 9px",borderRadius:20,background:p.bg,color:p.text}}>{t.priority}</span>}
+              {t.due && <span style={{fontSize:12,color:"#8e8e93"}}>Due {fmtDate(t.due)}</span>}
             </div>
-            {t.reason && <div style={{fontSize:12, color:"#8e8e93", fontStyle:"italic", marginTop:5}}>{t.reason}</div>}
-            {t.score !== null && (
-              <div style={{display:"flex", alignItems:"center", gap:8, marginTop:8}}>
-                <div style={{flex:1, height:4, background:"#e5e5ea", borderRadius:4, overflow:"hidden"}}>
-                  <div style={{width:t.score+"%", height:"100%", background:scColor, borderRadius:4}} />
-                </div>
-                <span style={{fontSize:11, color:"#8e8e93", minWidth:22, textAlign:"right"}}>{t.score}</span>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginTop:8}}>
+              <div style={{flex:1,height:4,background:"#e5e5ea",borderRadius:4,overflow:"hidden"}}>
+                <div style={{width:t.score+"%",height:"100%",background:scColor,borderRadius:4}}/>
               </div>
-            )}
+              <span style={{fontSize:11,color:"#8e8e93",minWidth:22,textAlign:"right"}}>{t.score}</span>
+            </div>
           </div>
-          <button onClick={() => deleteTask(t.id)} style={{width:28, height:28, borderRadius:"50%", border:"none", background:"#ff3b30", color:"#fff", fontSize:13, cursor:"pointer", flexShrink:0}}>✕</button>
+          <button onClick={function(){deleteTask(t.id);}} style={{width:28,height:28,borderRadius:"50%",border:"none",background:"#ff3b30",color:"#fff",fontSize:13,cursor:"pointer",flexShrink:0}}>✕</button>
         </div>
       </div>
     );
   }
 
   return (
-    <div style={{maxWidth:430, margin:"0 auto", paddingBottom:100, background:"#f5f5f7", minHeight:"100vh"}}>
+    <div style={{maxWidth:430,margin:"0 auto",paddingBottom:40,fontFamily:"-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",minHeight:"100vh",background:"#f5f5f7"}}>
 
-      {/* Header */}
-      <div style={{background:"#fff", padding:"16px 20px 12px", borderBottom:"0.5px solid #e0e0e0", position:"sticky", top:0, zIndex:10}}>
-        <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start"}}>
-          <div>
-            <div style={{fontSize:22, fontWeight:600, color:"#1c1c1e"}}>Daily planner</div>
-            <div style={{fontSize:13, color:"#8e8e93", marginTop:2}}>Planning for {fmtDate(getTomorrow())}</div>
-          </div>
-          {total > 0 && (
+      <div style={{background:"#fff",padding:"16px 20px 0",borderBottom:"0.5px solid #e0e0e0",position:"sticky",top:0,zIndex:10}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <div style={{fontSize:20,fontWeight:600,color:"#1c1c1e"}}>Daily planner</div>
+          {tab==="planner" && total>0 && (
             <div style={{textAlign:"right"}}>
-              <div style={{fontSize:20, fontWeight:600, color:"#1c1c1e"}}>{done}/{total}</div>
-              <div style={{fontSize:11, color:"#8e8e93"}}>tasks done</div>
+              <div style={{fontSize:18,fontWeight:600,color:"#1c1c1e"}}>{done}/{total}</div>
+              <div style={{fontSize:11,color:"#8e8e93"}}>done</div>
             </div>
           )}
         </div>
-        {total > 0 && (
-          <div style={{marginTop:10}}>
-            <div style={{height:4, background:"#e5e5ea", borderRadius:4, overflow:"hidden"}}>
-              <div style={{width:pct+"%", height:"100%", background:"#34c759", borderRadius:4, transition:"width 0.3s"}} />
+        {tab==="planner" && total>0 && (
+          <div style={{marginBottom:10}}>
+            <div style={{height:4,background:"#e5e5ea",borderRadius:4,overflow:"hidden"}}>
+              <div style={{width:pct+"%",height:"100%",background:"#34c759",borderRadius:4,transition:"width 0.3s"}}/>
             </div>
-            <div style={{fontSize:12, color:"#8e8e93", textAlign:"right", marginTop:3}}>{pct}% complete</div>
+            <div style={{fontSize:12,color:"#8e8e93",textAlign:"right",marginTop:3}}>{pct}% complete</div>
           </div>
         )}
-      </div>
-
-      {/* Add form */}
-      <div style={{background:"#fff", margin:"12px 16px", borderRadius:16, padding:16, boxShadow:"0 1px 3px rgba(0,0,0,0.08)"}}>
-        <div style={{fontSize:11, fontWeight:600, color:"#8e8e93", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:10}}>Add task</div>
-        <input value={title} onChange={e => setTitle(e.target.value)} onKeyDown={e => { if(e.key==="Enter") addTask(); }}
-          placeholder="What needs to get done?"
-          style={{width:"100%", padding:"12px 14px", border:"1px solid #e0e0e0", borderRadius:12, fontSize:16, outline:"none", color:"#1c1c1e", background:"#f9f9f9", boxSizing:"border-box"}} />
-        <input type="date" value={due} onChange={e => setDue(e.target.value)}
-          style={{width:"100%", padding:"11px 14px", border:"1px solid #e0e0e0", borderRadius:12, fontSize:15, outline:"none", color:"#1c1c1e", background:"#f9f9f9", marginTop:8, boxSizing:"border-box"}} />
-        <div style={{display:"flex", gap:7, overflowX:"auto", padding:"10px 0 4px"}}>
-          {CATS.map(c => {
-            const active = selCat === c.id;
-            return (
-              <button key={c.id} onClick={() => setSelCat(c.id)}
-                style={{flexShrink:0, padding:"6px 14px", borderRadius:20, fontSize:13, fontWeight:500, cursor:"pointer",
-                  background:active?c.bg:"transparent", color:active?c.color:"#8e8e93",
-                  border:active?"1.5px solid "+c.border:"1px solid #e0e0e0"}}>
-                {c.label}
-              </button>
-            );
+        <div style={{display:"flex",borderTop:"0.5px solid #e0e0e0"}}>
+          {["planner","stats","history"].map(function(t){
+            return <button key={t} onClick={function(){setTab(t);}} style={TAB_STYLE(tab===t)}>{t.charAt(0).toUpperCase()+t.slice(1)}</button>;
           })}
         </div>
-        <button onClick={addTask} style={{width:"100%", marginTop:12, padding:14, background:"#007aff", color:"#fff", border:"none", borderRadius:12, fontSize:16, fontWeight:600, cursor:"pointer"}}>
-          + Add Task
-        </button>
       </div>
 
-      {/* Filter bar */}
-      {total > 0 && (
-        <div style={{display:"flex", gap:7, overflowX:"auto", padding:"4px 16px 8px"}}>
-          {[{id:"all", label:"All ("+total+")"}].concat(usedCats.map(cid => ({id:cid, label:(CAT[cid]?CAT[cid].label:cid)+" ("+tasks.filter(t=>t.category===cid).length+")"}))).map(f => {
-            const active = filterCat === f.id;
-            const c = CAT[f.id];
-            return (
-              <button key={f.id} onClick={() => setFilterCat(f.id)}
-                style={{flexShrink:0, padding:"5px 14px", borderRadius:20, fontSize:13, fontWeight:500, cursor:"pointer",
-                  background:active?(c?c.bg:"#1c1c1e"):"#fff",
-                  color:active?(c?c.color:"#fff"):"#8e8e93",
-                  border:active&&c?"1px solid "+c.border:"1px solid #e0e0e0"}}>
-                {f.label}
-              </button>
-            );
-          })}
+      {tab==="planner" && (
+        <div>
+          <div style={{background:"#fff",margin:"12px 16px",borderRadius:16,padding:16,border:"0.5px solid #e0e0e0"}}>
+            <div style={{fontSize:11,fontWeight:600,color:"#8e8e93",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:10}}>Add task</div>
+            <input value={title} onChange={function(e){setTitle(e.target.value);}} onKeyDown={function(e){if(e.key==="Enter")addTask();}}
+              placeholder="What needs to get done?"
+              style={{width:"100%",padding:"12px 14px",border:"1px solid #e0e0e0",borderRadius:12,fontSize:16,outline:"none",color:"#1c1c1e",background:"#f9f9f9",boxSizing:"border-box"}}/>
+            <input type="date" value={due} onChange={function(e){setDue(e.target.value);}}
+              style={{width:"100%",padding:"11px 14px",border:"1px solid #e0e0e0",borderRadius:12,fontSize:15,outline:"none",color:"#1c1c1e",background:"#f9f9f9",marginTop:8,boxSizing:"border-box"}}/>
+            <div style={{display:"flex",gap:7,overflowX:"auto",padding:"10px 0 4px"}}>
+              {CATS.map(function(c){
+                var active=selCat===c.id;
+                return <button key={c.id} onClick={function(){setSelCat(c.id);}} style={{flexShrink:0,padding:"6px 14px",borderRadius:20,fontSize:13,fontWeight:500,cursor:"pointer",background:active?c.bg:"transparent",color:active?c.color:"#8e8e93",border:active?"1.5px solid "+c.border:"1px solid #e0e0e0"}}>{c.label}</button>;
+              })}
+            </div>
+            <button onClick={addTask} style={{width:"100%",marginTop:12,padding:14,background:"#007aff",color:"#fff",border:"none",borderRadius:12,fontSize:16,fontWeight:600,cursor:"pointer"}}>+ Add Task</button>
+          </div>
+
+          {total>0 && (
+            <div style={{display:"flex",gap:7,overflowX:"auto",padding:"4px 16px 8px"}}>
+              {[{id:"all",label:"All ("+total+")"}].concat(usedCats.map(function(cid){return {id:cid,label:(CAT[cid]?CAT[cid].label:cid)+" ("+tasks.filter(function(t){return t.category===cid;}).length+")"};})).map(function(f){
+                var active=filterCat===f.id; var c=CAT[f.id];
+                return <button key={f.id} onClick={function(){setFilterCat(f.id);}} style={{flexShrink:0,padding:"5px 14px",borderRadius:20,fontSize:13,fontWeight:500,cursor:"pointer",background:active?(c?c.bg:"#1c1c1e"):"#fff",color:active?(c?c.color:"#fff"):"#8e8e93",border:active&&c?"1px solid "+c.border:"0.5px solid #e0e0e0"}}>{f.label}</button>;
+              })}
+            </div>
+          )}
+
+          <div style={{padding:"0 16px",display:"flex",flexDirection:"column",gap:10}}>
+            {total===0 ? (
+              <div style={{textAlign:"center",padding:"48px 24px",color:"#c7c7cc",border:"1px dashed #e0e0e0",borderRadius:16,marginTop:8}}>
+                <div style={{fontSize:40,marginBottom:8}}>📋</div>
+                <div style={{fontSize:15}}>No tasks yet — add one above</div>
+              </div>
+            ) : (
+              <div>
+                {visiblePending.map(function(t,idx){return <div key={t.id} style={{marginBottom:10}}><TaskCard t={t} idx={idx} showRank={true}/></div>;})}
+                {visibleDone.length>0 && (
+                  <div>
+                    <div style={{display:"flex",alignItems:"center",gap:8,margin:"8px 0"}}>
+                      <div style={{flex:1,height:"0.5px",background:"#e0e0e0"}}/>
+                      <span style={{fontSize:12,fontWeight:600,color:"#8e8e93"}}>COMPLETED ({visibleDone.length})</span>
+                      <div style={{flex:1,height:"0.5px",background:"#e0e0e0"}}/>
+                    </div>
+                    {visibleDone.map(function(t,idx){return <div key={t.id} style={{marginBottom:10}}><TaskCard t={t} idx={idx} showRank={false}/></div>;})}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {total>0 && (
+            <div style={{padding:"16px"}}>
+              <button onClick={function(){setShowSummary(true);}} style={{width:"100%",padding:14,background:"#34c759",color:"#fff",border:"none",borderRadius:12,fontSize:15,fontWeight:600,cursor:"pointer"}}>End Day</button>
+            </div>
+          )}
+
+          {showSummary && (
+            <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:100,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+              <div style={{background:"#fff",borderRadius:"20px 20px 0 0",padding:"24px 20px 40px",width:"100%",maxWidth:430}}>
+                <div style={{fontSize:18,fontWeight:600,color:"#1c1c1e",marginBottom:4}}>End of day summary</div>
+                <div style={{fontSize:13,color:"#8e8e93",marginBottom:20}}>{fmtDate(getToday())}</div>
+                <div style={{display:"flex",gap:10,marginBottom:20}}>
+                  <StatCard label="Completed" value={done} sub={"of "+total+" tasks"}/>
+                  <StatCard label="Completion" value={pct+"%"} sub={pct>=70?"Great job!":pct>=40?"Good effort!":"Keep going!"}/>
+                </div>
+                {done>0 && (
+                  <div style={{marginBottom:20}}>
+                    <div style={{fontSize:13,fontWeight:500,color:"#8e8e93",marginBottom:8}}>Completed tasks</div>
+                    {tasks.filter(function(t){return t.done;}).map(function(t){
+                      var c=CAT[t.category]||{label:t.category,bg:"#eee",color:"#333"};
+                      return <div key={t.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 0",borderBottom:"0.5px solid #e0e0e0"}}>
+                        <span style={{fontSize:13,color:"#34c759",fontWeight:700}}>✓</span>
+                        <span style={{fontSize:14,color:"#1c1c1e",flex:1}}>{t.title}</span>
+                        <span style={{fontSize:11,fontWeight:600,padding:"2px 8px",borderRadius:20,background:c.bg,color:c.color}}>{c.label}</span>
+                      </div>;
+                    })}
+                  </div>
+                )}
+                <button onClick={endDay} style={{width:"100%",padding:14,background:"#1c1c1e",color:"#fff",border:"none",borderRadius:12,fontSize:16,fontWeight:600,cursor:"pointer",marginBottom:10}}>Save & Clear</button>
+                <button onClick={function(){setShowSummary(false);}} style={{width:"100%",padding:14,background:"#f2f2f7",color:"#8e8e93",border:"none",borderRadius:12,fontSize:15,cursor:"pointer"}}>Cancel</button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Task list */}
-      <div style={{padding:"0 16px", display:"flex", flexDirection:"column", gap:10}}>
-        {total === 0 ? (
-          <div style={{textAlign:"center", padding:"48px 24px", color:"#c7c7cc", border:"1px dashed #e0e0e0", borderRadius:16, marginTop:8}}>
-            <div style={{fontSize:40, marginBottom:8}}>📋</div>
-            <div style={{fontSize:15}}>No tasks yet — add one above</div>
-          </div>
-        ) : (
-          <>
-            {/* Pending */}
-            {visiblePending.map((t, idx) => <TaskCard key={t.id} t={t} idx={idx} showRank={analyzed} />)}
-
-            {/* Completed section */}
-            {visibleDone.length > 0 && (
-              <>
-                <div style={{display:"flex", alignItems:"center", gap:8, marginTop:8}}>
-                  <div style={{flex:1, height:"0.5px", background:"#e0e0e0"}} />
-                  <span style={{fontSize:12, fontWeight:600, color:"#8e8e93"}}>COMPLETED ({visibleDone.length})</span>
-                  <div style={{flex:1, height:"0.5px", background:"#e0e0e0"}} />
+      {tab==="stats" && (
+        <div style={{padding:"16px"}}>
+          {totalDays===0 ? (
+            <div style={{textAlign:"center",padding:"48px 24px",color:"#c7c7cc",border:"1px dashed #e0e0e0",borderRadius:16,marginTop:8}}>
+              <div style={{fontSize:40,marginBottom:8}}>📊</div>
+              <div style={{fontSize:15}}>No history yet — complete your first day to see stats</div>
+            </div>
+          ) : (
+            <div>
+              <div style={{fontSize:13,fontWeight:600,color:"#8e8e93",textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:10}}>Overview</div>
+              <div style={{display:"flex",gap:10,marginBottom:10}}>
+                <StatCard label="Days tracked" value={totalDays} sub="days"/>
+                <StatCard label="Current streak" value={streak+"d"} sub={streak>0?"Keep it up!":"—"}/>
+              </div>
+              <div style={{display:"flex",gap:10,marginBottom:20}}>
+                <StatCard label="Tasks completed" value={totalCompleted} sub={"of "+totalTasksEver+" total"}/>
+                <StatCard label="Avg completion" value={avgPct+"%"} sub="per day"/>
+              </div>
+              {bestDay.date && (
+                <div style={{background:"#e5e5ea",borderRadius:12,padding:"12px 14px",marginBottom:20}}>
+                  <div style={{fontSize:12,color:"#8e8e93",marginBottom:4}}>Best day</div>
+                  <div style={{fontSize:18,fontWeight:600,color:"#1c1c1e"}}>{fmtDate(bestDay.date)}</div>
+                  <div style={{fontSize:13,color:"#8e8e93",marginTop:2}}>{bestDay.completed} tasks · {bestDay.pct}%</div>
                 </div>
-                {visibleDone.map((t, idx) => <TaskCard key={t.id} t={t} idx={idx} showRank={false} />)}
-              </>
-            )}
-          </>
-        )}
-      </div>
+              )}
+              {catBreakdown.length>0 && (
+                <div>
+                  <div style={{fontSize:13,fontWeight:600,color:"#8e8e93",textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:10}}>Category breakdown</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                    {catBreakdown.map(function(c){
+                      return <div key={c.id} style={{background:"#fff",borderRadius:12,padding:"12px 14px",border:"0.5px solid #e0e0e0",borderLeft:"4px solid "+c.border}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                          <span style={{fontSize:14,fontWeight:500,color:"#1c1c1e"}}>{c.label}</span>
+                          <span style={{fontSize:13,color:"#8e8e93"}}>{c.done}/{c.total} · {c.pct}%</span>
+                        </div>
+                        <div style={{height:5,background:"#e5e5ea",borderRadius:4,overflow:"hidden"}}>
+                          <div style={{width:c.pct+"%",height:"100%",background:c.color,borderRadius:4}}/>
+                        </div>
+                      </div>;
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
-      {error && <div style={{color:"#ff3b30", fontSize:13, padding:"8px 16px"}}>{error}</div>}
-      {analyzed && total > 0 && <div style={{fontSize:13, color:"#8e8e93", textAlign:"center", padding:"8px 0"}}>Sorted by AI priority score</div>}
-
-      {/* Bottom bar */}
-      <div style={{position:"fixed", bottom:0, left:0, right:0, background:"rgba(255,255,255,0.95)", borderTop:"0.5px solid #e0e0e0", padding:"12px 16px 28px", display:"flex", gap:10, maxWidth:430, margin:"0 auto"}}>
-        <button onClick={clearAll} style={{padding:"14px 18px", background:"#f2f2f7", color:"#8e8e93", border:"none", borderRadius:12, fontSize:14, fontWeight:500, cursor:"pointer"}}>Clear</button>
-        <button onClick={analyze} disabled={loading||!total} style={{flex:1, padding:14, background:"#1c1c1e", color:"#fff", border:"none", borderRadius:12, fontSize:16, fontWeight:600, cursor:"pointer", opacity:(loading||!total)?0.5:1}}>
-          {loading ? "Analyzing..." : analyzed ? "Re-analyze" : "Analyze with AI"}
-        </button>
-      </div>
+      {tab==="history" && (
+        <div style={{padding:"16px"}}>
+          {history.length===0 ? (
+            <div style={{textAlign:"center",padding:"48px 24px",color:"#c7c7cc",border:"1px dashed #e0e0e0",borderRadius:16,marginTop:8}}>
+              <div style={{fontSize:40,marginBottom:8}}>📅</div>
+              <div style={{fontSize:15}}>No history yet — tap "End Day" after completing tasks</div>
+            </div>
+          ) : (
+            <div style={{display:"flex",flexDirection:"column",gap:12}}>
+              {history.map(function(entry,i){
+                return <div key={i} style={{background:"#fff",borderRadius:16,padding:"14px 16px",border:"0.5px solid #e0e0e0"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                    <div style={{fontSize:15,fontWeight:600,color:"#1c1c1e"}}>{fmtDate(entry.date)}</div>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <span style={{fontSize:13,color:"#8e8e93"}}>{entry.completed}/{entry.total}</span>
+                      <span style={{fontSize:12,fontWeight:600,padding:"2px 9px",borderRadius:20,background:entry.pct>=70?"#EAF3DE":entry.pct>=40?"#FAEEDA":"#FCEBEB",color:entry.pct>=70?"#3B6D11":entry.pct>=40?"#854F0B":"#A32D2D"}}>{entry.pct}%</span>
+                    </div>
+                  </div>
+                  <div style={{height:4,background:"#e5e5ea",borderRadius:4,overflow:"hidden",marginBottom:10}}>
+                    <div style={{width:entry.pct+"%",height:"100%",background:entry.pct>=70?"#34c759":entry.pct>=40?"#ff9500":"#ff3b30",borderRadius:4}}/>
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                    {entry.tasks.map(function(t,j){
+                      var c=CAT[t.category]||{label:t.category,bg:"#eee",color:"#333"};
+                      return <div key={j} style={{display:"flex",alignItems:"center",gap:8}}>
+                        <span style={{fontSize:12,color:t.done?"#34c759":"#c7c7cc",fontWeight:700,width:14}}>{t.done?"✓":"○"}</span>
+                        <span style={{fontSize:13,color:t.done?"#1c1c1e":"#c7c7cc",flex:1}}>{t.title}</span>
+                        <span style={{fontSize:10,fontWeight:600,padding:"2px 7px",borderRadius:20,background:c.bg,color:c.color,flexShrink:0}}>{c.label}</span>
+                      </div>;
+                    })}
+                  </div>
+                </div>;
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
 </script>
 </body>
 </html>
