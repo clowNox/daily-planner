@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-title" content="Daily Planner"/>
+<title>Daily Planner</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f7;color:#1c1c1e;min-height:100vh;}
+input,button{font-family:inherit;}
+::-webkit-scrollbar{display:none;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState } = React;
+
+const CATS = [
+  {id:"work",      label:"Work",      color:"#185FA5", bg:"#E6F1FB", border:"#85B7EB"},
+  {id:"essential", label:"Essential", color:"#7F77DD", bg:"#EEEDFE", border:"#AFA9EC"},
+  {id:"health",    label:"Health",    color:"#0F6E56", bg:"#E1F5EE", border:"#5DCAA5"},
+  {id:"family",    label:"Family",    color:"#993C1D", bg:"#FAECE7", border:"#F0997B"},
+  {id:"grooming",  label:"Grooming",  color:"#993556", bg:"#FBEAF0", border:"#ED93B1"},
+  {id:"pet",       label:"Pet",       color:"#3B6D11", bg:"#EAF3DE", border:"#97C459"},
+  {id:"friends",   label:"Friends",   color:"#854F0B", bg:"#FAEEDA", border:"#EF9F27"},
+  {id:"business",  label:"Business",  color:"#5F5E5A", bg:"#F1EFE8", border:"#B4B2A9"},
+];
+const CAT = {};
+CATS.forEach(c => { CAT[c.id] = c; });
+const PRI = {
+  High:   {bg:"#FCEBEB", text:"#A32D2D"},
+  Medium: {bg:"#FAEEDA", text:"#854F0B"},
+  Low:    {bg:"#EAF3DE", text:"#3B6D11"},
+};
+
+function getTomorrow() {
+  const d = new Date(); d.setDate(d.getDate() + 1);
+  return d.toISOString().split("T")[0];
+}
+function getToday() { return new Date().toISOString().split("T")[0]; }
+function fmtDate(d) {
+  if (!d) return "";
+  const p = d.split("-");
+  return p[2] + "/" + p[1] + "/" + p[0];
+}
+
+function App() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem("dtp-v4") || "{}"); } catch(e) {}
+
+  const [tasks, setTasksRaw] = useState(saved.tasks || []);
+  const [analyzed, setAnalyzedRaw] = useState(saved.analyzed || false);
+  const [selCat, setSelCat] = useState("work");
+  const [filterCat, setFilterCat] = useState("all");
+  const [title, setTitle] = useState("");
+  const [due, setDue] = useState(getTomorrow());
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  function persist(t, a) {
+    try { localStorage.setItem("dtp-v4", JSON.stringify({tasks: t, analyzed: a})); } catch(e) {}
+  }
+  function setTasks(t, a) {
+    const an = a !== undefined ? a : analyzed;
+    setTasksRaw(t); setAnalyzedRaw(an); persist(t, an);
+  }
+
+  function addTask() {
+    if (!title.trim()) return;
+    setTasks(tasks.concat([{id: Date.now(), title: title.trim(), due, category: selCat, score: null, priority: null, reason: null, done: false}]), false);
+    setTitle("");
+  }
+
+  function toggleDone(id) {
+    setTasks(tasks.map(x => x.id === id ? Object.assign({}, x, {done: !x.done}) : x), analyzed);
+  }
+
+  function deleteTask(id) {
+    setTasks(tasks.filter(x => x.id !== id), false);
+  }
+
+  function clearAll() { setTasksRaw([]); setAnalyzedRaw(false); persist([], false); }
+
+  function analyze() {
+    if (!tasks.length) return;
+    setLoading(true); setError("");
+    const list = tasks.map((t, i) => {
+      const cat = CAT[t.category] ? CAT[t.category].label : t.category;
+      return (i+1) + ". " + t.title + " | Cat: " + cat + " | Due: " + (t.due || "none");
+    }).join("\n");
+    const prompt = "Score each task 0-100 by urgency (today=" + getToday() + ") and category. High=70-100, Medium=40-69, Low=0-39. Max 10 word reason.\nTasks:\n" + list + "\nJSON only: [{\"index\":1,\"score\":80,\"priority\":\"High\",\"reason\":\"short reason\"}]";
+    fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({model:"claude-sonnet-4-20250514", max_tokens:1000, messages:[{role:"user", content:prompt}]})
+    })
+    .then(r => r.json())
+    .then(data => {
+      const raw = (data.content||[]).map(b => b.text||"").join("").replace(/```json|```/g,"").trim();
+      const results = JSON.parse(raw);
+      let updated = tasks.map((t, i) => {
+        let found = null;
+        results.forEach(r => { if (r.index === i+1) found = r; });
+        return found ? Object.assign({}, t, {score: found.score, priority: found.priority, reason: found.reason}) : t;
+      });
+      updated.sort((a, b) => (b.score||0) - (a.score||0));
+      setTasks(updated, true); setLoading(false);
+    })
+    .catch(() => { setError("Analysis failed. Please try again."); setLoading(false); });
+  }
+
+  const done = tasks.filter(t => t.done).length;
+  const total = tasks.length;
+  const pct = total ? Math.round((done/total)*100) : 0;
+  const pending = tasks.filter(t => !t.done);
+  const completed = tasks.filter(t => t.done);
+  const visiblePending = filterCat === "all" ? pending : pending.filter(t => t.category === filterCat);
+  const visibleDone = filterCat === "all" ? completed : completed.filter(t => t.category === filterCat);
+  const usedCats = [];
+  tasks.forEach(t => { if (!usedCats.includes(t.category)) usedCats.push(t.category); });
+
+  function TaskCard({t, idx, showRank}) {
+    const c = CAT[t.category] || {label:t.category, color:"#333", bg:"#eee", border:"#ccc"};
+    const p = PRI[t.priority] || {bg:"#eee", text:"#333"};
+    const sc = t.score || 0;
+    const scColor = sc >= 70 ? "#ff3b30" : sc >= 40 ? "#ff9500" : "#34c759";
+    return (
+      <div style={{background:"#fff", borderRadius:16, padding:"14px 16px", boxShadow:"0 1px 3px rgba(0,0,0,0.07)", borderLeft:"4px solid "+c.border, opacity:t.done?0.55:1}}>
+        <div style={{display:"flex", alignItems:"flex-start", gap:10}}>
+          <div onClick={() => toggleDone(t.id)} style={{width:24, height:24, borderRadius:"50%", flexShrink:0, marginTop:1, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", background:t.done?"#34c759":"transparent", border:t.done?"2px solid #34c759":"2px solid #c7c7cc"}}>
+            {t.done && <span style={{color:"#fff", fontSize:13, fontWeight:700}}>✓</span>}
+          </div>
+          <div style={{flex:1, minWidth:0}}>
+            <div style={{display:"flex", alignItems:"center", gap:6}}>
+              {showRank && <span style={{fontSize:12, fontWeight:600, color:"#c7c7cc"}}>#{idx+1}</span>}
+              <span style={{fontSize:15, fontWeight:500, color:"#1c1c1e", textDecoration:t.done?"line-through":"none"}}>{t.title}</span>
+            </div>
+            <div style={{display:"flex", gap:6, flexWrap:"wrap", alignItems:"center", marginTop:6}}>
+              <span style={{fontSize:11, fontWeight:600, padding:"3px 9px", borderRadius:20, background:c.bg, color:c.color}}>{c.label}</span>
+              {t.priority && <span style={{fontSize:11, fontWeight:600, padding:"3px 9px", borderRadius:20, background:p.bg, color:p.text}}>{t.priority}</span>}
+              {t.due && <span style={{fontSize:12, color:"#8e8e93"}}>Due {fmtDate(t.due)}</span>}
+            </div>
+            {t.reason && <div style={{fontSize:12, color:"#8e8e93", fontStyle:"italic", marginTop:5}}>{t.reason}</div>}
+            {t.score !== null && (
+              <div style={{display:"flex", alignItems:"center", gap:8, marginTop:8}}>
+                <div style={{flex:1, height:4, background:"#e5e5ea", borderRadius:4, overflow:"hidden"}}>
+                  <div style={{width:t.score+"%", height:"100%", background:scColor, borderRadius:4}} />
+                </div>
+                <span style={{fontSize:11, color:"#8e8e93", minWidth:22, textAlign:"right"}}>{t.score}</span>
+              </div>
+            )}
+          </div>
+          <button onClick={() => deleteTask(t.id)} style={{width:28, height:28, borderRadius:"50%", border:"none", background:"#ff3b30", color:"#fff", fontSize:13, cursor:"pointer", flexShrink:0}}>✕</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{maxWidth:430, margin:"0 auto", paddingBottom:100, background:"#f5f5f7", minHeight:"100vh"}}>
+
+      {/* Header */}
+      <div style={{background:"#fff", padding:"16px 20px 12px", borderBottom:"0.5px solid #e0e0e0", position:"sticky", top:0, zIndex:10}}>
+        <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start"}}>
+          <div>
+            <div style={{fontSize:22, fontWeight:600, color:"#1c1c1e"}}>Daily planner</div>
+            <div style={{fontSize:13, color:"#8e8e93", marginTop:2}}>Planning for {fmtDate(getTomorrow())}</div>
+          </div>
+          {total > 0 && (
+            <div style={{textAlign:"right"}}>
+              <div style={{fontSize:20, fontWeight:600, color:"#1c1c1e"}}>{done}/{total}</div>
+              <div style={{fontSize:11, color:"#8e8e93"}}>tasks done</div>
+            </div>
+          )}
+        </div>
+        {total > 0 && (
+          <div style={{marginTop:10}}>
+            <div style={{height:4, background:"#e5e5ea", borderRadius:4, overflow:"hidden"}}>
+              <div style={{width:pct+"%", height:"100%", background:"#34c759", borderRadius:4, transition:"width 0.3s"}} />
+            </div>
+            <div style={{fontSize:12, color:"#8e8e93", textAlign:"right", marginTop:3}}>{pct}% complete</div>
+          </div>
+        )}
+      </div>
+
+      {/* Add form */}
+      <div style={{background:"#fff", margin:"12px 16px", borderRadius:16, padding:16, boxShadow:"0 1px 3px rgba(0,0,0,0.08)"}}>
+        <div style={{fontSize:11, fontWeight:600, color:"#8e8e93", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:10}}>Add task</div>
+        <input value={title} onChange={e => setTitle(e.target.value)} onKeyDown={e => { if(e.key==="Enter") addTask(); }}
+          placeholder="What needs to get done?"
+          style={{width:"100%", padding:"12px 14px", border:"1px solid #e0e0e0", borderRadius:12, fontSize:16, outline:"none", color:"#1c1c1e", background:"#f9f9f9", boxSizing:"border-box"}} />
+        <input type="date" value={due} onChange={e => setDue(e.target.value)}
+          style={{width:"100%", padding:"11px 14px", border:"1px solid #e0e0e0", borderRadius:12, fontSize:15, outline:"none", color:"#1c1c1e", background:"#f9f9f9", marginTop:8, boxSizing:"border-box"}} />
+        <div style={{display:"flex", gap:7, overflowX:"auto", padding:"10px 0 4px"}}>
+          {CATS.map(c => {
+            const active = selCat === c.id;
+            return (
+              <button key={c.id} onClick={() => setSelCat(c.id)}
+                style={{flexShrink:0, padding:"6px 14px", borderRadius:20, fontSize:13, fontWeight:500, cursor:"pointer",
+                  background:active?c.bg:"transparent", color:active?c.color:"#8e8e93",
+                  border:active?"1.5px solid "+c.border:"1px solid #e0e0e0"}}>
+                {c.label}
+              </button>
+            );
+          })}
+        </div>
+        <button onClick={addTask} style={{width:"100%", marginTop:12, padding:14, background:"#007aff", color:"#fff", border:"none", borderRadius:12, fontSize:16, fontWeight:600, cursor:"pointer"}}>
+          + Add Task
+        </button>
+      </div>
+
+      {/* Filter bar */}
+      {total > 0 && (
+        <div style={{display:"flex", gap:7, overflowX:"auto", padding:"4px 16px 8px"}}>
+          {[{id:"all", label:"All ("+total+")"}].concat(usedCats.map(cid => ({id:cid, label:(CAT[cid]?CAT[cid].label:cid)+" ("+tasks.filter(t=>t.category===cid).length+")"}))).map(f => {
+            const active = filterCat === f.id;
+            const c = CAT[f.id];
+            return (
+              <button key={f.id} onClick={() => setFilterCat(f.id)}
+                style={{flexShrink:0, padding:"5px 14px", borderRadius:20, fontSize:13, fontWeight:500, cursor:"pointer",
+                  background:active?(c?c.bg:"#1c1c1e"):"#fff",
+                  color:active?(c?c.color:"#fff"):"#8e8e93",
+                  border:active&&c?"1px solid "+c.border:"1px solid #e0e0e0"}}>
+                {f.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Task list */}
+      <div style={{padding:"0 16px", display:"flex", flexDirection:"column", gap:10}}>
+        {total === 0 ? (
+          <div style={{textAlign:"center", padding:"48px 24px", color:"#c7c7cc", border:"1px dashed #e0e0e0", borderRadius:16, marginTop:8}}>
+            <div style={{fontSize:40, marginBottom:8}}>📋</div>
+            <div style={{fontSize:15}}>No tasks yet — add one above</div>
+          </div>
+        ) : (
+          <>
+            {/* Pending */}
+            {visiblePending.map((t, idx) => <TaskCard key={t.id} t={t} idx={idx} showRank={analyzed} />)}
+
+            {/* Completed section */}
+            {visibleDone.length > 0 && (
+              <>
+                <div style={{display:"flex", alignItems:"center", gap:8, marginTop:8}}>
+                  <div style={{flex:1, height:"0.5px", background:"#e0e0e0"}} />
+                  <span style={{fontSize:12, fontWeight:600, color:"#8e8e93"}}>COMPLETED ({visibleDone.length})</span>
+                  <div style={{flex:1, height:"0.5px", background:"#e0e0e0"}} />
+                </div>
+                {visibleDone.map((t, idx) => <TaskCard key={t.id} t={t} idx={idx} showRank={false} />)}
+              </>
+            )}
+          </>
+        )}
+      </div>
+
+      {error && <div style={{color:"#ff3b30", fontSize:13, padding:"8px 16px"}}>{error}</div>}
+      {analyzed && total > 0 && <div style={{fontSize:13, color:"#8e8e93", textAlign:"center", padding:"8px 0"}}>Sorted by AI priority score</div>}
+
+      {/* Bottom bar */}
+      <div style={{position:"fixed", bottom:0, left:0, right:0, background:"rgba(255,255,255,0.95)", borderTop:"0.5px solid #e0e0e0", padding:"12px 16px 28px", display:"flex", gap:10, maxWidth:430, margin:"0 auto"}}>
+        <button onClick={clearAll} style={{padding:"14px 18px", background:"#f2f2f7", color:"#8e8e93", border:"none", borderRadius:12, fontSize:14, fontWeight:500, cursor:"pointer"}}>Clear</button>
+        <button onClick={analyze} disabled={loading||!total} style={{flex:1, padding:14, background:"#1c1c1e", color:"#fff", border:"none", borderRadius:12, fontSize:16, fontWeight:600, cursor:"pointer", opacity:(loading||!total)?0.5:1}}>
+          {loading ? "Analyzing..." : analyzed ? "Re-analyze" : "Analyze with AI"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
